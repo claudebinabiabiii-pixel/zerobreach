@@ -1,1 +1,11 @@
-
+admin
+administrator
+root
+user
+test
+guest
+manager
+operator
+support
+owner
+moderator
